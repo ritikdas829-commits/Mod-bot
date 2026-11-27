@@ -26,12 +26,18 @@ function getConnectedLavalinkNodes(client) {
 }
 
 export function assertLavalinkNodeAvailable(client) {
-    if (!getConnectedLavalinkNodes(client).length) {
-        throw new TitanBotError(
-            'Lavalink unavailable',
-            ErrorTypes.CONFIGURATION,
-            'Music is temporarily unavailable — no Lavalink nodes are connected. Try again shortly or configure your own Lavalink server.',
-        );
+    try {
+        const nodes = getConnectedLavalinkNodes(client);
+        if (!nodes.length) {
+            throw new TitanBotError(
+                'Lavalink unavailable',
+                ErrorTypes.CONFIGURATION,
+                'Music is temporarily unavailable — no Lavalink nodes are connected. Try again shortly or configure your own Lavalink server.',
+            );
+        }
+    } catch (err) {
+        console.error('[Music Warning] Lavalink node check failed:', err.message);
+        throw err;
     }
 }
 
@@ -54,12 +60,14 @@ function assertBotVoicePermissions(channel) {
 }
 
 async function waitForPlayerConnection(player) {
-    if (player.connected) {
+    if (!player || player.connected) {
         return;
     }
 
     try {
-        await player.connection.resolve();
+        if (player.connection) {
+            await player.connection.resolve();
+        }
     } catch {
         // Fall through to event-based wait below.
     }
@@ -86,12 +94,21 @@ async function waitForPlayerConnection(player) {
 }
 
 async function startPlayback(player) {
-    await waitForPlayerConnection(player);
-    await player.play();
+    if (!player) return;
+    try {
+        await waitForPlayerConnection(player);
+        await player.play();
+    } catch (err) {
+        console.error('[Music Error] Failed to start playback:', err);
+    }
 }
 
 export function getPlayer(client, guildId) {
-    return client.riffy?.players?.get(guildId) || null;
+    try {
+        return client.riffy?.players?.get(guildId) || null;
+    } catch {
+        return null;
+    }
 }
 
 export function assertRiffyAvailable(client) {
@@ -143,7 +160,9 @@ export async function ensurePlayer(client, interaction) {
         guildData.playerChannelId = interaction.channel.id;
     }
 
-    player.setVolume(guildData.volume);
+    if (player && typeof player.setVolume === 'function') {
+        player.setVolume(guildData.volume);
+    }
     return { player, guildData };
 }
 
@@ -155,7 +174,7 @@ function isDuplicateTrack(player, track) {
     if (player.current?.info?.uri === uri) {
         return true;
     }
-    return player.queue.some((existing) => existing.info?.uri === uri);
+    return player.queue?.some((existing) => existing.info?.uri === uri) || false;
 }
 
 export async function joinVoiceChannel(client, interaction) {
@@ -187,7 +206,9 @@ export async function joinVoiceChannel(client, interaction) {
         guildData.playerChannelId = interaction.channel.id;
     }
 
-    player.setVolume(guildData.volume);
+    if (player && typeof player.setVolume === 'function') {
+        player.setVolume(guildData.volume);
+    }
 
     return successEmbed(
         'Joined Voice Channel',
@@ -288,8 +309,6 @@ export async function skipTrack(client, interaction) {
     }
     assertCanControl(interaction.member, player);
     const title = player.current.info?.title || 'Unknown';
-    // Under track-loop, stop() would replay the same track. Clear it so the skip
-    // advances; trackStart re-applies the stored loop mode to the next track.
     if (player.loop === 'track') {
         player.setLoop('none');
     }
@@ -576,10 +595,14 @@ export async function destroyPlayerSession(client, guildId, player, guildData, {
     guildData.playerChannelId = null;
 
     if (player) {
-        player.queue.clear();
-        player.stop();
-        if (forceDisconnect || !guildData.twentyFourSeven) {
-            player.destroy();
+        try {
+            player.queue.clear();
+            player.stop();
+            if (forceDisconnect || !guildData.twentyFourSeven) {
+                player.destroy();
+            }
+        } catch {
+            // ignore player cleanup issues
         }
     }
 }
@@ -608,5 +631,9 @@ export async function replyMusicSuccess(interaction, embed) {
     if (!interaction._isPrefixCommand) {
         options.flags = MessageFlags.Ephemeral;
     }
-    await InteractionHelper.safeReply(interaction, options);
+    try {
+        await InteractionHelper.safeReply(interaction, options);
+    } catch (err) {
+        console.error('[Music Error] Failed to send reply:', err);
+    }
 }
